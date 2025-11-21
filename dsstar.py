@@ -241,33 +241,40 @@ class DS_STAR_Agent:
         # List of known agents
         agents = ["ANALYZER", "PLANNER", "CODER", "VERIFIER", "ROUTER", "DEBUGGER", "FINALYZER"]
         
-        def get_provider_for_model(model_name: str, config: DSConfig) -> ModelProvider:
-            if model_name.startswith("gpt") or model_name.startswith("o1"):
-                provider_cls = OpenAIProvider
-            else:
-                provider_cls = GeminiProvider
-            
-            # 1. Check provider-specific env var
-            # We instantiate a dummy to get the env var name
-            dummy = provider_cls(api_key="dummy", model_name="dummy")
-            env_var = dummy.env_var_name
-            
-            api_key = os.environ.get(env_var)
-            
-            # 2. Fallback to config.api_key if env var is missing
-            if not api_key and config.api_key:
-                 api_key = config.api_key
-            
-            if not api_key:
-                 raise ValueError(f"API Key not found for model {model_name}. "
-                                  f"Please set {env_var} or ensure config.api_key is set.")
-            
-            return provider_cls(api_key, model_name)
-
         for agent in agents:
             model_name = config.agent_models.get(agent, default_model)
-            self.providers[agent] = get_provider_for_model(model_name, config)
+            self.providers[agent] = self._get_provider_for_model(model_name, config)
             self.controller.logger.info(f"Initialized {agent} with model: {model_name}")
+        
+        # Setup execution environment
+        self.exec_dir = Path(config.runs_dir) / config.run_id / "exec_env"
+        self.exec_dir.mkdir(exist_ok=True)
+        
+        self._setup_tee_logging()
+
+    def _get_provider_for_model(self, model_name: str, config: DSConfig) -> ModelProvider:
+        """Factory method to create the appropriate model provider."""
+        if model_name.startswith("gpt") or model_name.startswith("o1"):
+            provider_cls = OpenAIProvider
+        else:
+            provider_cls = GeminiProvider
+        
+        # 1. Check provider-specific env var
+        # We instantiate a dummy to get the env var name
+        dummy = provider_cls(api_key="dummy", model_name="dummy")
+        env_var = dummy.env_var_name
+        
+        api_key = os.environ.get(env_var)
+        
+        # 2. Fallback to config.api_key if env var is missing
+        if not api_key and config.api_key:
+                api_key = config.api_key
+        
+        if not api_key:
+                raise ValueError(f"API Key not found for model {model_name}. "
+                                f"Please set {env_var} or ensure config.api_key is set.")
+        
+        return provider_cls(api_key, model_name)
         
         # Setup execution environment
         self.exec_dir = Path(config.runs_dir) / config.run_id / "exec_env"
@@ -388,7 +395,6 @@ class DS_STAR_Agent:
         except Exception as e:
             return "", f"Execution error: {str(e)}"
 
-
     def analyze_data(self, filename: str) -> Dict[str, str]:
         prompt = PROMPT_TEMPLATES["analyzer"].format(filename=filename)
         
@@ -508,6 +514,121 @@ class DS_STAR_Agent:
         )
         
         return self._extract_code_block(result)
+
+    def _run_analysis_phase(self, data_files: List[str]) -> Dict[str, str]:
+        """Phase 1: Analyze data files."""
+        if not self.controller.should_execute_step(0):
+            state = self.storage.get_current_state()
+            return state["data_descriptions"]
+
+        self.controller.logger.info("=== PHASE 1: ANALYZING DATA FILES ===")
+        data_descriptions = {}
+        for f in data_files:
+            self.controller.logger.info(f"Analyzing {f}...")
+            # Resolve absolute path
+            if Path(f).is_absolute():
+                abs_path = str(Path(f).resolve())
+            else:
+                abs_path = str(Path(self.config.data_dir).joinpath(f).resolve())
+            
+            analysis = self.analyze_data(abs_path)
+            data_descriptions[abs_path] = analysis["result"]
+        
+        state = self.storage.get_current_state()
+        state["data_descriptions"] = data_descriptions
+        self.storage.save_state(state)
+        return data_descriptions
+
+    def _run_execution_phase(self, query: str, data_desc_str: str, absolute_data_files: List[str], 
+                           start_step_index: int) -> Tuple[Optional[str], Optional[str]]:
+        """Phase 2: Iterative Planning & Execution."""
+        if not self.controller.should_execute_step(start_step_index):
+            # Try to load from previous run
+            steps = self.storage.list_steps()
+            for step in reversed(steps):
+                step_data = self.storage.get_step(step['step_id'])
+                if step_data and step_data.get('code'):
+                    self.controller.logger.info(f"Loaded code and results from step {step['step_id']}")
+                    return step_data['code'], step_data.get('result', '')
+            return None, None
+
+        self.controller.logger.info("=== PHASE 2: ITERATIVE PLANNING & VERIFICATION ===")
+        plan = []
+        # Initial plan
+        plan.append(self.plan_next_step(query, data_desc_str, plan, ""))
+        
+        code = self.generate_code(plan, data_desc_str)
+        exec_result, error = self._execute_code(code, absolute_data_files)
+        
+        # Initial Debug loop
+        self._debug_loop(code, error, data_desc_str, absolute_data_files)
+        
+        # Refinement rounds
+        for round_idx in range(self.config.max_refinement_rounds):
+            self.controller.logger.info(f"--- Refinement Round {round_idx+1} ---")
+            
+            verdict = self.verify_plan(plan, code, exec_result, query, data_desc_str)
+            
+            if verdict == "Sufficient":
+                self.controller.logger.info("Plan verified as sufficient!")
+                break
+            
+            routing = self.route_plan(plan, query, exec_result, data_desc_str)
+            
+            if "is wrong!" in routing:
+                # Truncate plan and retry
+                try:
+                    step_to_remove = int(routing.split()[1]) - 1
+                    plan = plan[:step_to_remove]
+                    self.controller.logger.info(f"Truncated plan to step {step_to_remove}")
+                except:
+                    plan = []
+            else:
+                self.controller.logger.info("Adding new step...")
+            
+            # Generate next step
+            next_plan = self.plan_next_step(query, data_desc_str, plan, exec_result)
+            plan.append(next_plan)
+            
+            # Generate and execute new code
+            code = self.generate_code(plan, data_desc_str, base_code=code)
+            exec_result, error = self._execute_code(code, absolute_data_files)
+            
+            # Debug loop
+            self._debug_loop(code, error, data_desc_str, absolute_data_files)
+        else:
+            self.controller.logger.warning("Max refinement rounds reached")
+            
+        return code, exec_result
+
+    def _debug_loop(self, code: str, error: str, data_desc_str: str, absolute_data_files: List[str]):
+        """Helper for the debug loop."""
+        debug_round = 0
+        max_debug_rounds = 3
+        while error and self.config.auto_debug and debug_round < max_debug_rounds:
+            self.controller.logger.warning(f"Debugging (Round {debug_round + 1}/{max_debug_rounds})...")
+            code = self.debug_code(code, error, data_desc_str, absolute_data_files)
+            exec_result, error = self._execute_code(code, absolute_data_files)
+            debug_round += 1
+
+    def _run_finalization_phase(self, code: str, exec_result: str, query: str, 
+                              data_desc_str: str, absolute_data_files: List[str]) -> str:
+        """Phase 3: Finalization."""
+        self.controller.logger.info("=== PHASE 3: FINALIZING ===")
+        final_code = self.finalize_solution(
+            code, exec_result, query,
+            "Format as JSON with key 'final_answer'",
+            data_desc_str
+        )
+        
+        final_result, _ = self._execute_code(final_code, absolute_data_files)
+        
+        # Save final output
+        output_file = self.storage.run_dir / "final_output" / "result.json"
+        output_file.write_text(final_result)
+        
+        return final_result, output_file
+
     def run_pipeline(self, query: str, data_files: List[str]) -> Dict[str, Any]:
         """Main pipeline with full persistence and resume capability."""
         self.controller.logger.info(f"Starting pipeline: {self.config.run_id}")
@@ -522,122 +643,21 @@ class DS_STAR_Agent:
         # Ensure data directory exists
         Path(self.config.data_dir).mkdir(exist_ok=True)
         
-        # Initialize variables that might be loaded from previous runs
-        code = None
-        exec_result = None
-        
         # PHASE 1: Data Analysis
-        if self.controller.should_execute_step(0):
-            self.controller.logger.info("=== PHASE 1: ANALYZING DATA FILES ===")
-            data_descriptions = {}
-            absolute_data_files = []
-            for i, f in enumerate(data_files):
-                self.controller.logger.info(f"Analyzing {f}...")
-                abs_path = str(Path(self.config.data_dir).joinpath(f).resolve())
-                absolute_data_files.append(abs_path)
-                analysis = self.analyze_data(abs_path)
-                data_descriptions[abs_path] = analysis["result"]
-            
-            state = self.storage.get_current_state()
-            state["data_descriptions"] = data_descriptions
-            self.storage.save_state(state)
-        else:
-            # Load from previous run
-            data_descriptions = state["data_descriptions"]
-            absolute_data_files = list(data_descriptions.keys())
-        
+        data_descriptions = self._run_analysis_phase(data_files)
+        absolute_data_files = list(data_descriptions.keys())
         data_desc_str = "\n".join([f"File: {k}\n{v}" for k, v in data_descriptions.items()])
         
         # PHASE 2: Iterative Planning & Execution
-        if self.controller.should_execute_step(len(absolute_data_files)):
-            self.controller.logger.info("=== PHASE 2: ITERATIVE PLANNING & VERIFICATION ===")
-            plan = []
-            plan.append(self.plan_next_step(query, data_desc_str, plan, ""))
-            
-            code = self.generate_code(plan, data_desc_str)
-            exec_result, error = self._execute_code(code, absolute_data_files)
-            
-            # Debug loop
-            debug_round = 0
-            max_debug_rounds = 3
-            while error and self.config.auto_debug and debug_round < max_debug_rounds:
-                self.controller.logger.warning(f"Debugging (Round {debug_round + 1}/{max_debug_rounds})...")
-                code = self.debug_code(code, error, data_desc_str, absolute_data_files)
-                exec_result, error = self._execute_code(code, absolute_data_files)
-                debug_round += 1
-            
-            # Refinement rounds
-            for round_idx in range(self.config.max_refinement_rounds):
-                self.controller.logger.info(f"--- Refinement Round {round_idx+1} ---")
-                
-                verdict = self.verify_plan(plan, code, exec_result, query, data_desc_str)
-                
-                if verdict == "Sufficient":
-                    self.controller.logger.info("Plan verified as sufficient!")
-                    break
-                
-                routing = self.route_plan(plan, query, exec_result, data_desc_str)
-                
-                if "is wrong!" in routing:
-                    # Truncate plan and retry
-                    try:
-                        step_to_remove = int(routing.split()[1]) - 1
-                        plan = plan[:step_to_remove]
-                        self.controller.logger.info(f"Truncated plan to step {step_to_remove}")
-                    except:
-                        plan = []
-                else:
-                    self.controller.logger.info("Adding new step...")
-                
-                # Generate next step
-                next_plan = self.plan_next_step(query, data_desc_str, plan, exec_result)
-                plan.append(next_plan)
-                
-                # Generate and execute new code
-                code = self.generate_code(plan, data_desc_str, base_code=code)
-                exec_result, error = self._execute_code(code, absolute_data_files)
-                
-                debug_round = 0
-                while error and self.config.auto_debug and debug_round < max_debug_rounds:
-                    self.controller.logger.warning(f"Debugging (Round {debug_round + 1}/{max_debug_rounds})...")
-                    code = self.debug_code(code, error, data_desc_str, absolute_data_files)
-                    exec_result, error = self._execute_code(code, absolute_data_files)
-                    debug_round += 1
-            else:
-                self.controller.logger.warning("Max refinement rounds reached")
+        # Calculate start step index for phase 2 (it's equal to number of files analyzed)
+        phase_2_start_index = len(absolute_data_files)
+        code, exec_result = self._run_execution_phase(query, data_desc_str, absolute_data_files, phase_2_start_index)
         
-        # Load code and exec_result from previous run if not defined (resuming case)
         if code is None or exec_result is None:
-            steps = self.storage.list_steps()
-            
-            # Find the last step with code
-            for step in reversed(steps):
-                step_data = self.storage.get_step(step['step_id'])
-                if step_data and step_data.get('code'):
-                    code = step_data['code']
-                    exec_result = step_data.get('result', '')
-                    self.controller.logger.info(f"Loaded code and results from step {step['step_id']}")
-                    break
-            
-            # If still not found, this is an error
-            if code is None:
-                raise ValueError("Could not load code from previous steps. Please ensure the pipeline has been run before.")
-            if exec_result is None:
-                exec_result = ""  # Default to empty string if not found
-        
+             raise ValueError("Could not produce or load valid code/results from Phase 2.")
+
         # PHASE 3: Finalization
-        self.controller.logger.info("=== PHASE 3: FINALIZING ===")
-        final_code = self.finalize_solution(
-            code, exec_result, query,
-            "Format as JSON with key 'final_answer'",
-            data_desc_str
-        )
-        
-        final_result, _ = self._execute_code(final_code, absolute_data_files)
-        
-        # Save final output
-        output_file = self.storage.run_dir / "final_output" / "result.json"
-        output_file.write_text(final_result)
+        final_result, output_file = self._run_finalization_phase(code, exec_result, query, data_desc_str, absolute_data_files)
         
         self.controller.logger.info("Pipeline completed successfully!")
         
@@ -647,6 +667,7 @@ class DS_STAR_Agent:
             "output_file": str(output_file),
             "total_steps": len(self.storage.list_steps())
         }
+
 # =============================================================================
 # CLI & USAGE
 # =============================================================================
