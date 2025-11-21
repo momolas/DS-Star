@@ -43,9 +43,6 @@ class DSConfig:
         if self.agent_models is None:
             self.agent_models = {}
 
-
-
-
 # =============================================================================
 # ARTIFACT STORAGE SYSTEM
 # =============================================================================
@@ -250,35 +247,20 @@ class DS_STAR_Agent:
             else:
                 provider_cls = GeminiProvider
             
-            # Get API key
-            # We check config first, then env var defined by the provider
-            # Note: We instantiate a dummy to get the env var name, or make it static.
-            # Since it's a property on instance in our design, we might need to change design or instantiate dummy.
-            # For now, let's just check the env var directly based on class.
-            
-            # Better approach: Pass the key if available in config, else let provider handle it or check env here.
-            # But config.api_key is currently a single field.
-            # If we have multiple providers, we might need multiple keys.
-            # For backward compatibility, config.api_key is likely the Gemini key or the "primary" key.
-            
-            # Let's assume config.api_key is for the default provider if it matches, otherwise check env.
-            
+            # 1. Check provider-specific env var
+            # We instantiate a dummy to get the env var name
             dummy = provider_cls(api_key="dummy", model_name="dummy")
             env_var = dummy.env_var_name
             
             api_key = os.environ.get(env_var)
-            if config.api_key and provider_cls == GeminiProvider: # Assume config.api_key is for Gemini if not specified otherwise
+            
+            # 2. Fallback to config.api_key if env var is missing
+            if not api_key and config.api_key:
                  api_key = config.api_key
             
-            # If we still don't have a key, and it's OpenAI, maybe config.api_key was meant for it?
-            # This is ambiguous. Let's rely on Env Vars for non-default providers if config.api_key is taken.
-            
             if not api_key:
-                 # Fallback: if config.api_key is set, try using it (user might have set it for OpenAI)
-                 if config.api_key:
-                     api_key = config.api_key
-                 else:
-                     raise ValueError(f"{env_var} must be set for model {model_name}")
+                 raise ValueError(f"API Key not found for model {model_name}. "
+                                  f"Please set {env_var} or ensure config.api_key is set.")
             
             return provider_cls(api_key, model_name)
 
@@ -353,8 +335,13 @@ class DS_STAR_Agent:
     
     def _extract_code_block(self, response: str) -> str:
         """Extract Python code from markdown blocks."""
-        code_blocks = re.findall(r'```(?:python)?\n(.*?)\n```', response, re.DOTALL)
-        return code_blocks[0] if code_blocks else response.strip()
+        # Match code blocks with or without language identifier
+        code_blocks = re.findall(r'```(?:[\w\s]*)\n(.*?)\n```', response, re.DOTALL)
+        if code_blocks:
+            # Return the last code block as it's likely the final solution
+            return code_blocks[-1].strip()
+        # Fallback: if no code blocks, check if the whole response looks like code
+        return response.strip()
     
     def _execute_code(self, code_script: str, data_files: Optional[List[str]] = None) -> Tuple[str, Optional[str]]:
         """Execute code in isolated environment."""
@@ -571,10 +558,13 @@ class DS_STAR_Agent:
             exec_result, error = self._execute_code(code, absolute_data_files)
             
             # Debug loop
-            while error and self.config.auto_debug:
-                self.controller.logger.warning("Debugging...")
+            debug_round = 0
+            max_debug_rounds = 3
+            while error and self.config.auto_debug and debug_round < max_debug_rounds:
+                self.controller.logger.warning(f"Debugging (Round {debug_round + 1}/{max_debug_rounds})...")
                 code = self.debug_code(code, error, data_desc_str, absolute_data_files)
                 exec_result, error = self._execute_code(code, absolute_data_files)
+                debug_round += 1
             
             # Refinement rounds
             for round_idx in range(self.config.max_refinement_rounds):
@@ -607,9 +597,12 @@ class DS_STAR_Agent:
                 code = self.generate_code(plan, data_desc_str, base_code=code)
                 exec_result, error = self._execute_code(code, absolute_data_files)
                 
-                while error and self.config.auto_debug:
+                debug_round = 0
+                while error and self.config.auto_debug and debug_round < max_debug_rounds:
+                    self.controller.logger.warning(f"Debugging (Round {debug_round + 1}/{max_debug_rounds})...")
                     code = self.debug_code(code, error, data_desc_str, absolute_data_files)
                     exec_result, error = self._execute_code(code, absolute_data_files)
+                    debug_round += 1
             else:
                 self.controller.logger.warning("Max refinement rounds reached")
         
