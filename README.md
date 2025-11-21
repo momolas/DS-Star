@@ -92,7 +92,7 @@ All artifacts for each run are stored in the `runs/` directory, organized by `ru
     
     # Optional: Configure specific models for different agents
     agent_models:
-      PLANNER: 'gpt-4'
+      PLANNER: 'gemini-1.5-pro'
       CODER: 'gemini-1.5-pro'
       VERIFIER: 'gemini-1.5-flash'
     ```

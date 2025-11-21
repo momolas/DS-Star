@@ -10,7 +10,7 @@ import atexit
 import yaml
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
-from provider import ModelProvider, GeminiProvider, OpenAIProvider
+from provider import ModelProvider, GeminiProvider
 
 # =============================================================================
 # CONFIGURATION & PROMPT TEMPLATES
@@ -254,10 +254,8 @@ class DS_STAR_Agent:
 
     def _get_provider_for_model(self, model_name: str, config: DSConfig) -> ModelProvider:
         """Factory method to create the appropriate model provider."""
-        if model_name.startswith("gpt") or model_name.startswith("o1"):
-            provider_cls = OpenAIProvider
-        else:
-            provider_cls = GeminiProvider
+        # Only support Gemini
+        provider_cls = GeminiProvider
         
         # 1. Check provider-specific env var
         # We instantiate a dummy to get the env var name
