@@ -556,7 +556,7 @@ class DS_STAR_Agent:
                 
                 verdict = self.verify_plan(plan, code, exec_result, query, data_desc_str)
                 
-                if verdict == "Sufficient":
+                if verdict.lower() == "yes":
                     self.controller.logger.info("Plan verified as sufficient!")
                     break
                 
