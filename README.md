@@ -170,6 +170,43 @@ The following options are available in `config.yaml` and can be overridden by CL
 - `preserve_artifacts` (bool): If true, all step artifacts are saved to the `runs` directory.
 - `agent_models` (dict): A dictionary mapping agent names (e.g., `PLANNER`, `CODER`) to specific model names. If not specified, `model_name` is used.
 
+## Providers
+
+DS-STAR supports multiple AI model providers. Each provider requires specific environment variables to be configured:
+
+### Google Gemini
+
+**Provider Identifier**: Default provider (no prefix required)
+
+**Environment Variable**:
+```bash
+export GEMINI_API_KEY='your-gemini-api-key'
+```
+
+**Model Examples**:`gemini-2.5-pro`, `gemini-2.0-flash`
+
+### OpenAI
+
+**Provider Identifier**: Models prefixed with `gpt` or `o1`
+
+**Environment Variable**:
+```bash
+export OPENAI_API_KEY='your-openai-api-key'
+```
+
+**Model Examples**: `gpt-4`, `gpt-4-turbo`, `o1`
+
+### Ollama
+
+**Provider Identifier**: Models prefixed with `ollama/`
+
+**Environment Variables**:
+```bash
+export OLLAMA_API_KEY='your-ollama-api-key'  # Optional
+export OLLAMA_HOST='http://localhost:11434'  # Optional, defaults to http://localhost:11434
+```
+
+**Model Examples**: `ollama/llama3`, `ollama/qwen3-coder`
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a pull request or open an issue for any bugs or feature requests.
