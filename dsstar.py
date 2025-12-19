@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 import atexit
 import yaml
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict, field, fields
 from datetime import datetime
 from provider import ModelProvider, GeminiProvider, OllamaProvider, OpenAIProvider
 
@@ -614,6 +614,22 @@ class DS_STAR_Agent:
 # CLI & USAGE
 # =============================================================================
 
+def create_config(args, file_config) -> DSConfig:
+    """Create configuration merging file config and CLI args."""
+    config_data = file_config.copy()
+
+    if args.resume:
+        config_data['run_id'] = args.resume
+    if args.interactive:
+        config_data['interactive'] = True
+    if args.max_rounds:
+        config_data['max_refinement_rounds'] = args.max_rounds
+
+    valid_keys = {f.name for f in fields(DSConfig)}
+    filtered_config = {k: v for k, v in config_data.items() if k in valid_keys}
+
+    return DSConfig(**filtered_config)
+
 def main():
     """CLI interface with resume and edit capabilities."""
     import argparse
@@ -628,26 +644,15 @@ def main():
     parser.add_argument("--config", type=str, help="Path to config file", default="config.yaml")
     args = parser.parse_args()
 
-    # Load config from file to set defaults
+    # Load config from file
     try:
         with open(args.config, 'r') as f:
-            config_defaults = yaml.safe_load(f) or {}
+            file_config = yaml.safe_load(f) or {}
     except FileNotFoundError:
-        config_defaults = {}
+        file_config = {}
     
-    # Combine config sources (CLI args take precedence)
-    config_params = {
-        'run_id': args.resume or config_defaults.get('run_id'),
-        'interactive': args.interactive or config_defaults.get('interactive', False),
-        'max_refinement_rounds': args.max_rounds or config_defaults.get('max_refinement_rounds', 5),
-        'model_name': config_defaults.get('model_name'),
-        'preserve_artifacts': config_defaults.get('preserve_artifacts', True)
-    }
+    config = create_config(args, file_config)
     
-    # Filter out None values so dataclass defaults are used
-    config_params = {k: v for k, v in config_params.items() if v is not None}
-    
-    config = DSConfig(**config_params)
     if not config.model_name:
         parser.error("Model name must be specified via config file.")
     
@@ -659,8 +664,8 @@ def main():
         return
 
     # Check for required arguments for a new run
-    query = args.query or config_defaults.get('query')
-    data_files = args.data_files or config_defaults.get('data_files')
+    query = args.query or file_config.get('query')
+    data_files = args.data_files or file_config.get('data_files')
 
     if not (data_files and query):
         parser.error("--data-files and --query are required for a new run.")
