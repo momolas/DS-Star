@@ -29,8 +29,8 @@ class GeminiProvider(ModelProvider):
     """Provider for Google's Gemini models."""
     
     def __init__(self, config_api_key: str, model_name: str):
-        # In GeminiProvider the order is first config_api_key for backward compatibility
-        self.api_key = config_api_key or os.getenv(self.env_var_name)
+        # Prioritize environment variable over config file
+        self.api_key = os.getenv(self.env_var_name) or config_api_key
         if not self.api_key:
             raise ValueError(f"Missing API key for {model_name}. Env var = {self.env_var_name}.")
 
