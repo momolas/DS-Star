@@ -16,8 +16,14 @@ from provider import ModelProvider, GeminiProvider, OllamaProvider, OpenAIProvid
 # CONFIGURATION & PROMPT TEMPLATES
 # =============================================================================
 
-with open("prompt.yaml", "r") as f:
-    PROMPT_TEMPLATES = yaml.safe_load(f)
+PROMPT_PATH = Path(__file__).parent / "prompt.yaml"
+try:
+    with open(PROMPT_PATH, "r") as f:
+        PROMPT_TEMPLATES = yaml.safe_load(f)
+except FileNotFoundError:
+    # Fallback for development environments or odd execution contexts
+    with open("prompt.yaml", "r") as f:
+        PROMPT_TEMPLATES = yaml.safe_load(f)
 
 @dataclass
 class DSConfig:

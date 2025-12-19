@@ -51,5 +51,8 @@ build-backend = "hatchling.build"
 dev-dependencies = []
 
 [tool.hatch.build.targets.wheel]
-packages = ["dsstar.py"]
+packages = ["dsstar.py", "provider.py"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"prompt.yaml" = "prompt.yaml"
 
