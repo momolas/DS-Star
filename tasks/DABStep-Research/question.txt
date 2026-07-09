@@ -1,0 +1,1 @@
+Analyze the payments dataset to identify and resolve data quality issues that impact fee calculation accuracy. Create a comprehensive data preparation report that documents data inconsistencies, validates fee rule applicability, and proposes a cleaning strategy to ensure merchants are charged correctly based on their transaction characteristics and business profiles.
