@@ -6,7 +6,7 @@
 DS-STAR is a state-of-the-art data science agent whose versatility is shown by its ability to automate a range of tasks, from statistical analysis and data wrangling to visualization and deep data research, across various data types.
 
 <div align="center">
-  <img src="assets/overview.pdf" alt="DS-STAR Overview" width="90%"/>
+  <img src="assets/overview.png" alt="DS-STAR Overview" width="90%"/>
 </div>
 
 ## Key Features
